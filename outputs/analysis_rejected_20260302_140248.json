@@ -1,0 +1,12 @@
+{
+  "product": null,
+  "category": null,
+  "quantity": null,
+  "unit": null,
+  "budget_min": null,
+  "budget_max": null,
+  "deadline": null,
+  "requester_email": "no-reply@accounts.google.com",
+  "is_valid": false,
+  "rejection_reason": "This is a Google security notification email, not a procurement request"
+}
