@@ -97,10 +97,10 @@ def run():
         output_file = os.path.join(OUTPUT_DIR, f"analysis_result_{timestamp}.json")
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(dataclasses.asdict(spec), f, ensure_ascii=False, indent=2, default=str)
-        print(f"\n💾 Result saved to: {output_file}")
-        print("\n\ud83c\udf89 The agent successfully extracted the procurement spec from a real email!")
+        print(f"\n[SAVED] Result saved to: {output_file}")
+        print("\n[SUCCESS] The agent successfully extracted the procurement spec from a real email!")
     else:
-        print(f"   \u274c Rejected: {spec.rejection_reason}")
+        print(f"   [REJECTED] Rejected: {spec.rejection_reason}")
         print("   Tip: Make sure the email clearly describes a product/service and quantity.")
 
         # Save rejection to JSON too
@@ -108,7 +108,7 @@ def run():
         output_file = os.path.join(OUTPUT_DIR, f"analysis_rejected_{timestamp}.json")
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(dataclasses.asdict(spec), f, ensure_ascii=False, indent=2, default=str)
-        print(f"\n\ud83d\udcbe Rejection details saved to: {output_file}")
+        print(f"\n[SAVED] Rejection details saved to: {output_file}")
 
 
 

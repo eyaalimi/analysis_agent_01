@@ -1,0 +1,23 @@
+# terraform/terraform.tfvars
+# Copy this file, fill in your values, and run:
+#   terraform init
+#   terraform plan
+#   terraform apply
+
+aws_region   = "us-east-1"   # Change to your SES region (e.g. eu-west-1)
+project_name = "procurement-agent"
+image_tag    = "latest"
+
+bedrock_model_id = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+
+# Emails that SES will process — must be on a domain verified in SES
+ses_recipient_emails = ["procurement@yourdomain.com"]
+
+# Gmail SMTP credentials (used to send ACK emails)
+gmail_address      = "your-email@gmail.com"
+gmail_app_password = "your16charapppassword"  # No spaces
+
+# Optional: PostgreSQL connection string (leave empty if not used)
+database_url = ""
+
+log_level = "INFO"

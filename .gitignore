@@ -30,3 +30,6 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+
+# Generated agent outputs (runtime artifacts)
+outputs/

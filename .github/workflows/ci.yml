@@ -1,0 +1,119 @@
+# .github/workflows/ci.yml
+# Continuous Integration — runs on every push to every branch.
+#
+# Jobs:
+#   1. lint    — ruff code style check
+#   2. test    — pytest unit tests
+#   3. terraform — fmt check + validate (dev & prod)
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  PYTHON_VERSION: "3.11"
+  TERRAFORM_VERSION: "1.7.5"
+
+jobs:
+  # ── 1. Lint ───────────────────────────────────────────────────────────────
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff check
+        run: ruff check . --output-format=github
+
+  # ── 2. Tests ──────────────────────────────────────────────────────────────
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    needs: lint
+
+    # Minimal env vars so config.py / settings doesn't raise on import
+    env:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      BEDROCK_MODEL_ID: us.anthropic.claude-sonnet-4-20250514-v1:0
+      TAVILY_API_KEY: test-key
+      GMAIL_ADDRESS: test@test.com
+      GMAIL_APP_PASSWORD: testpassword
+      DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+      APP_ENV: test
+      LOG_LEVEL: WARNING
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-mock
+
+      - name: Run pytest
+        run: pytest tests/ -v --tb=short
+
+  # ── 3. Terraform ──────────────────────────────────────────────────────────
+  terraform:
+    name: Terraform (fmt + validate)
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      # Check all .tf files are properly formatted
+      - name: terraform fmt check
+        run: terraform fmt -check -recursive
+        working-directory: terraform
+
+      # Validate the dev environment (no backend needed for validate)
+      - name: terraform init — dev
+        run: terraform init -backend=false
+        working-directory: terraform/environments/dev
+
+      - name: terraform validate — dev
+        run: terraform validate
+        working-directory: terraform/environments/dev
+
+      # Validate the prod environment
+      - name: terraform init — prod
+        run: terraform init -backend=false
+        working-directory: terraform/environments/prod
+
+      - name: terraform validate — prod
+        run: terraform validate
+        working-directory: terraform/environments/prod
+
+      # Run terraform plan only when AWS credentials are available (main branch or secrets set)
+      - name: terraform plan — dev
+        if: ${{ secrets.AWS_ACCESS_KEY_ID_DEV != '' }}
+        run: |
+          terraform init
+          terraform plan -var-file="terraform.tfvars" -no-color
+        working-directory: terraform/environments/dev
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+        continue-on-error: true  # Non-blocking: plan is informational on feature branches

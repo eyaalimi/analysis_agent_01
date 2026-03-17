@@ -10,4 +10,9 @@ openpyxl
 pytesseract
 pillow>=9.5.0
 beautifulsoup4
-apscheduler>=3.10.0
+apscheduler>=3.10.0# Agent 2 — Sourcing
+requests>=2.31.0
+tenacity>=8.2.0
+# Testing
+pytest>=7.4.0
+pytest-mock>=3.12.0
