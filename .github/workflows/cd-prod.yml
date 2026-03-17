@@ -1,0 +1,84 @@
+# .github/workflows/cd-prod.yml
+# Deploy to PROD — triggered manually via "Run workflow" button on GitHub Actions.
+# Requires manual approval via the `prod` environment protection rule.
+# AWS steps are skipped if AWS_ACCESS_KEY_ID_PROD secret is not configured yet.
+#
+# Setup required (one time):
+#   GitHub → Settings → Environments → prod → Add required reviewer
+
+name: CD — PROD
+
+on:
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+  TERRAFORM_VERSION: "1.7.5"
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy-prod:
+    name: Deploy → PROD
+    runs-on: ubuntu-latest
+    environment: prod  # manual approval gate
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      # ── AWS credentials (skip all AWS steps if not configured yet) ──────────
+      - name: Configure AWS credentials
+        if: ${{ secrets.AWS_ACCESS_KEY_ID_PROD != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        if: ${{ secrets.AWS_ACCESS_KEY_ID_PROD != '' }}
+        run: terraform init
+        working-directory: terraform/environments/prod
+
+      - name: Terraform plan (review before apply)
+        if: ${{ secrets.AWS_ACCESS_KEY_ID_PROD != '' }}
+        run: terraform plan -var-file="terraform.tfvars" -no-color
+        working-directory: terraform/environments/prod
+
+      - name: Terraform apply
+        if: ${{ secrets.AWS_ACCESS_KEY_ID_PROD != '' }}
+        run: terraform apply -auto-approve -var-file="terraform.tfvars"
+        working-directory: terraform/environments/prod
+
+      - name: Build & push Docker image to ECR
+        if: ${{ secrets.AWS_ACCESS_KEY_ID_PROD != '' }}
+        run: |
+          ECR_URL=$(terraform -chdir=terraform/environments/prod output -raw ecr_repository_url)
+          IMAGE_TAG=$(git rev-parse --short HEAD)
+          aws ecr get-login-password --region $AWS_REGION | \
+            docker login --username AWS --password-stdin $ECR_URL
+          docker build --platform linux/amd64 -t $ECR_URL:$IMAGE_TAG -t $ECR_URL:latest .
+          docker push $ECR_URL:$IMAGE_TAG
+          docker push $ECR_URL:latest
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          echo "ECR_URL=$ECR_URL" >> $GITHUB_ENV
+
+      - name: Update Lambda function code
+        if: ${{ secrets.AWS_ACCESS_KEY_ID_PROD != '' }}
+        run: |
+          LAMBDA_NAME=$(terraform -chdir=terraform/environments/prod output -raw lambda_function_name)
+          aws lambda update-function-code \
+            --function-name $LAMBDA_NAME \
+            --image-uri $ECR_URL:$IMAGE_TAG \
+            --no-cli-pager
+
+      - name: AWS not configured — skipping deploy
+        if: ${{ secrets.AWS_ACCESS_KEY_ID_PROD == '' }}
+        run: echo "AWS_ACCESS_KEY_ID_PROD not set. Add it to GitHub Secrets to enable deployment."
