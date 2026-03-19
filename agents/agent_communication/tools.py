@@ -3,11 +3,14 @@ agents/agent_communication/tools.py
 Tools used by the Communication Agent — email sending, inbox monitoring,
 supplier email recovery, and reminder logic.
 """
+import io
 import json
 import imaplib
 import email as email_lib
 from datetime import datetime, timezone
 from strands import tool
+
+import pdfplumber
 
 from config import settings
 from email_gateway.sender import EmailSender
@@ -151,19 +154,38 @@ def fetch_supplier_replies(rfq_subject_prefix: str) -> str:
             if settings.gmail_address.lower() in from_addr.lower():
                 continue
 
-            # Extract body
+            # Extract body text and PDF attachments
             body_text = ""
+            pdf_texts = []
+
             if msg.is_multipart():
                 for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
+                    content_type = part.get_content_type()
+                    disposition = str(part.get("Content-Disposition", ""))
+
+                    # Plain text body
+                    if content_type == "text/plain" and "attachment" not in disposition:
+                        payload = part.get_payload(decode=True)
+                        if payload and not body_text:
+                            body_text = payload.decode("utf-8", errors="replace")
+
+                    # PDF attachment
+                    elif content_type == "application/pdf":
                         payload = part.get_payload(decode=True)
                         if payload:
-                            body_text = payload.decode("utf-8", errors="replace")
-                        break
+                            pdf_text = _extract_text_from_pdf(payload)
+                            if pdf_text:
+                                filename = part.get_filename() or "attachment.pdf"
+                                pdf_texts.append(f"[PDF: {filename}]\n{pdf_text}")
             else:
                 payload = msg.get_payload(decode=True)
                 if payload:
                     body_text = payload.decode("utf-8", errors="replace")
+
+            # Combine body + PDF content
+            full_body = body_text.strip()
+            if pdf_texts:
+                full_body += "\n\n--- PDF ATTACHMENTS ---\n" + "\n\n".join(pdf_texts)
 
             # Extract sender email from "Name <email>" format
             sender_email = from_addr
@@ -173,7 +195,8 @@ def fetch_supplier_replies(rfq_subject_prefix: str) -> str:
             replies.append({
                 "from_email": sender_email.strip(),
                 "subject": msg.get("Subject", ""),
-                "body": body_text[:2000],  # Limit body size
+                "body": full_body[:5000],
+                "has_pdf": len(pdf_texts) > 0,
                 "received_at": msg.get("Date", ""),
             })
 
@@ -188,6 +211,21 @@ def fetch_supplier_replies(rfq_subject_prefix: str) -> str:
 
 
 # ── Helpers (non-tool) ────────────────────────────────────────────────────────
+
+def _extract_text_from_pdf(pdf_bytes: bytes) -> str:
+    """Extract text content from a PDF file (in-memory bytes)."""
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            pages = []
+            for page in pdf.pages[:20]:  # Limit to 20 pages
+                text = page.extract_text()
+                if text:
+                    pages.append(text)
+            return "\n".join(pages)[:4000]  # Limit total text size
+    except Exception as exc:
+        logger.warning("PDF extraction failed", extra={"error": str(exc)})
+        return ""
+
 
 def is_reminder_due(sent_at: str, hours_threshold: int = 72) -> bool:
     """Check if enough time has passed since the RFQ was sent to warrant a reminder."""
