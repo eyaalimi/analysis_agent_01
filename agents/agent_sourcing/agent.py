@@ -5,20 +5,15 @@ and returns a ranked list of supplier candidates.
 
 Input  : ProcurementSpec dict (JSON output of Agent 1 / AnalysisAgent)
 Output : SupplierList dataclass with up to 12 ranked Tunisian supplier candidates
-
-Pattern: Same as agents/analysis/agent.py — Strands Agent + BedrockModel + @tool decorators.
 """
-
 import json
-import re
 import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import requests
-from strands import Agent, tool
+from strands import Agent
 from strands.models import BedrockModel
 
 # Ensure project root is importable when running this file directly.
@@ -28,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from config import settings
 from logger import get_logger
+from agents.agent_sourcing.tools import search_suppliers, get_supplier_contact
 
 logger = get_logger(__name__)
 
@@ -78,7 +74,6 @@ Rules:
 @dataclass
 class SupplierInfo:
     """Represents a single supplier candidate."""
-
     name: str
     website: str
     country: str
@@ -91,158 +86,9 @@ class SupplierInfo:
 @dataclass
 class SupplierList:
     """Output of the Sourcing Agent."""
-
     suppliers: list  # list[SupplierInfo]
     query_used: str
     search_timestamp: str
-
-
-# ── Tools ─────────────────────────────────────────────────────────────────────
-
-@tool
-def search_suppliers(product: str, category: str, max_results: int = 12) -> str:
-    """
-    Search for Tunisian suppliers using Tavily Search API.
-
-    Args:
-        product: Product or service name (e.g. "wooden office desk")
-        category: Procurement category (e.g. "Office Supplies")
-        max_results: Maximum number of results to return (default 12)
-
-    Returns:
-        JSON array of raw search results with keys: title, url, content, score.
-        Returns an empty array if Tavily key is not configured or search fails.
-    """
-    if not settings.tavily_api_key:
-        logger.warning("Tavily API key not configured — skipping supplier search")
-        return json.dumps([])
-
-    # "Tunisie" included in both French and English to maximise Tunisian results
-    query = f"{product} fournisseur Tunisie supplier Tunisia {category}"
-    logger.info("Searching Tunisian suppliers via Tavily", extra={"query": query})
-
-    try:
-        response = requests.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": settings.tavily_api_key,
-                "query": query,
-                "search_depth": "advanced",  # Deeper search for better Tunisian coverage
-                "max_results": max_results,
-                # Exclude generic marketplaces — we want real B2B Tunisian suppliers
-                "exclude_domains": ["amazon.com", "ebay.com", "alibaba.com", "aliexpress.com"],
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        # Return a simplified, token-efficient result list for the LLM
-        simplified = [
-            {
-                "title": r.get("title", ""),
-                "url": r.get("url", ""),
-                "content": r.get("content", "")[:400],  # Trim long content
-                "score": round(r.get("score", 0.0), 3),
-            }
-            for r in data.get("results", [])
-        ]
-        return json.dumps(simplified, ensure_ascii=False)
-
-    except requests.RequestException as exc:
-        logger.error("Tavily search failed", extra={"error": str(exc)})
-        return json.dumps([])
-
-
-EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
-SKIP_PREFIXES = ("noreply", "no-reply", "example", "test", "donotreply", "webmaster", "info@example")
-
-# Common contact page paths to try when scraping a supplier's website
-_CONTACT_PATHS = ["/contact", "/contact-us", "/contactez-nous", "/nous-contacter", "/contact.html", "/about", "/a-propos"]
-
-
-def _scrape_email_from_url(url: str) -> Optional[str]:
-    """
-    Fetch a URL and extract the first valid email from its HTML.
-    Returns None if no email found or request fails.
-    """
-    try:
-        resp = requests.get(
-            url,
-            timeout=8,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; ProcurementBot/1.0)"},
-            allow_redirects=True,
-        )
-        if resp.status_code != 200:
-            return None
-        from bs4 import BeautifulSoup
-        text = BeautifulSoup(resp.text, "html.parser").get_text(separator=" ")
-        for email in EMAIL_PATTERN.findall(text):
-            if not any(email.lower().startswith(p) for p in SKIP_PREFIXES):
-                return email
-    except Exception:
-        pass
-    return None
-
-
-@tool
-def get_supplier_contact(supplier_name: str, website: str) -> str:
-    """
-    Find a supplier's contact email using two strategies:
-    1. Direct scraping of the supplier's contact page (most reliable).
-    2. Tavily search fallback if scraping finds nothing.
-
-    Args:
-        supplier_name: Name of the company (e.g. "Korsi.tn")
-        website: Company website URL (e.g. "https://korsi.tn")
-
-    Returns:
-        JSON object with key "email" (string or null).
-    """
-    logger.info("Looking up supplier contact", extra={"supplier": supplier_name, "website": website})
-
-    base = website.rstrip("/")
-
-    # ── Strategy 1: direct page scraping ──────────────────────────────────────
-    # Try common contact page paths on the supplier's website
-    for path in _CONTACT_PATHS:
-        email = _scrape_email_from_url(f"{base}{path}")
-        if email:
-            logger.info("Email found via scraping", extra={"supplier": supplier_name, "email": email})
-            return json.dumps({"email": email})
-
-    # Also try the homepage itself
-    email = _scrape_email_from_url(base)
-    if email:
-        logger.info("Email found on homepage", extra={"supplier": supplier_name, "email": email})
-        return json.dumps({"email": email})
-
-    # ── Strategy 2: Tavily fallback ────────────────────────────────────────────
-    if settings.tavily_api_key:
-        try:
-            domain = base.replace("https://", "").replace("http://", "").split("/")[0]
-            response = requests.post(
-                "https://api.tavily.com/search",
-                json={
-                    "api_key": settings.tavily_api_key,
-                    "query": f"{supplier_name} email contact",
-                    "search_depth": "basic",
-                    "max_results": 3,
-                    "include_domains": [domain] if domain else [],
-                },
-                timeout=10,
-            )
-            response.raise_for_status()
-            for result in response.json().get("results", []):
-                for email in EMAIL_PATTERN.findall(result.get("content", "")):
-                    if not any(email.lower().startswith(p) for p in SKIP_PREFIXES):
-                        logger.info("Email found via Tavily", extra={"supplier": supplier_name, "email": email})
-                        return json.dumps({"email": email})
-        except requests.RequestException as exc:
-            logger.warning("Tavily contact fallback failed", extra={"error": str(exc)})
-
-    logger.info("No email found", extra={"supplier": supplier_name})
-    return json.dumps({"email": None})
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -315,7 +161,6 @@ class SourcingAgent:
         deadline = procurement_spec.get("deadline")
         requester_email = procurement_spec.get("requester_email", "")
 
-        # Extract the domain from the requester email to give context to the LLM
         requester_domain = requester_email.split("@")[-1] if "@" in requester_email else ""
 
         logger.info(
@@ -341,11 +186,9 @@ and return up to 12 results ranked by relevance.
             response = self._agent(prompt)
             raw = str(response).strip()
 
-            # Try strict JSON parse first
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                # Fallback: extract JSON from markdown code block or surrounding text
                 cleaned = raw
                 if cleaned.startswith("```") and "```" in cleaned[3:]:
                     parts = cleaned.split("```")
@@ -392,7 +235,6 @@ and return up to 12 results ranked by relevance.
 
 # ═══════════════════════════════════════════════════════════════════
 # STANDALONE MODE  —  python agents/agent_sourcing/agent.py
-# Runs a quick test with a hardcoded procurement spec.
 # ═══════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     import os
@@ -409,11 +251,10 @@ if __name__ == "__main__":
         reload(_cfg)
         from config import settings
     else:
-        print(f"⚠️  .env not found at {_env_path}")
+        print(f"  .env not found at {_env_path}")
         import sys
         sys.exit(1)
 
-    # Sample input: output of Agent 1 for a valid procurement request
     sample_spec = {
         "product": "wooden office desk",
         "category": "Office Supplies",
@@ -427,7 +268,7 @@ if __name__ == "__main__":
         "rejection_reason": None,
     }
 
-    print("\n🔍  Sourcing Agent — standalone test")
+    print("\n  Sourcing Agent — standalone test")
     print(f"    Product  : {sample_spec['product']}")
     print(f"    Category : {sample_spec['category']}")
     print(f"    Budget   : {sample_spec['budget_max']} TND\n")
@@ -435,7 +276,7 @@ if __name__ == "__main__":
     agent = SourcingAgent()
     result = agent.source(sample_spec)
 
-    print(f"✅  Found {len(result.suppliers)} supplier(s):\n")
+    print(f"  Found {len(result.suppliers)} supplier(s):\n")
     for i, s in enumerate(result.suppliers, 1):
         print(f"  [{i}] {s.name}")
         print(f"      Website : {s.website}")
@@ -445,5 +286,5 @@ if __name__ == "__main__":
         print()
 
     import json as _json
-    print("📄  Full JSON output:")
+    print("  Full JSON output:")
     print(_json.dumps(asdict(result), indent=2, ensure_ascii=False))

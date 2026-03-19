@@ -61,8 +61,8 @@ class TestSearchSuppliersTool:
 
     def test_returns_empty_list_when_no_api_key(self, monkeypatch):
         """Must return [] when TAVILY_API_KEY is not set."""
-        from agents.agent_sourcing.agent import search_suppliers
-        monkeypatch.setattr("agents.agent_sourcing.agent.settings.tavily_api_key", "")
+        from agents.agent_sourcing.tools import search_suppliers
+        monkeypatch.setattr("agents.agent_sourcing.tools.settings.tavily_api_key", "")
 
         result = json.loads(search_suppliers("desk", "Office Supplies"))
 
@@ -72,14 +72,14 @@ class TestSearchSuppliersTool:
         self, monkeypatch, mock_tavily_search_response
     ):
         """Must return a list of simplified result dicts on a successful Tavily call."""
-        from agents.agent_sourcing.agent import search_suppliers
-        monkeypatch.setattr("agents.agent_sourcing.agent.settings.tavily_api_key", "fake-key")
+        from agents.agent_sourcing.tools import search_suppliers
+        monkeypatch.setattr("agents.agent_sourcing.tools.settings.tavily_api_key", "fake-key")
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = mock_tavily_search_response
         mock_resp.raise_for_status.return_value = None
 
-        with patch("requests.post", return_value=mock_resp):
+        with patch("agents.agent_sourcing.tools.requests.post", return_value=mock_resp):
             result = json.loads(search_suppliers("wooden office desk", "Office Supplies"))
 
         assert len(result) == 2
@@ -91,18 +91,18 @@ class TestSearchSuppliersTool:
     def test_returns_empty_list_on_network_error(self, monkeypatch):
         """Must return [] gracefully on a network/timeout error."""
         import requests as req
-        from agents.agent_sourcing.agent import search_suppliers
-        monkeypatch.setattr("agents.agent_sourcing.agent.settings.tavily_api_key", "fake-key")
+        from agents.agent_sourcing.tools import search_suppliers
+        monkeypatch.setattr("agents.agent_sourcing.tools.settings.tavily_api_key", "fake-key")
 
-        with patch("requests.post", side_effect=req.RequestException("timeout")):
+        with patch("agents.agent_sourcing.tools.requests.post", side_effect=req.RequestException("timeout")):
             result = json.loads(search_suppliers("desk", "Office Supplies"))
 
         assert result == []
 
     def test_content_is_truncated_to_400_chars(self, monkeypatch):
         """Content in results must be trimmed to 400 characters."""
-        from agents.agent_sourcing.agent import search_suppliers
-        monkeypatch.setattr("agents.agent_sourcing.agent.settings.tavily_api_key", "fake-key")
+        from agents.agent_sourcing.tools import search_suppliers
+        monkeypatch.setattr("agents.agent_sourcing.tools.settings.tavily_api_key", "fake-key")
 
         long_content = "A" * 1000
         mock_resp = MagicMock()
@@ -111,7 +111,7 @@ class TestSearchSuppliersTool:
         }
         mock_resp.raise_for_status.return_value = None
 
-        with patch("requests.post", return_value=mock_resp):
+        with patch("agents.agent_sourcing.tools.requests.post", return_value=mock_resp):
             result = json.loads(search_suppliers("item", "Category"))
 
         assert len(result[0]["content"]) == 400
@@ -122,19 +122,35 @@ class TestSearchSuppliersTool:
 class TestGetSupplierContactTool:
     """Unit tests for the get_supplier_contact @tool function."""
 
-    def test_returns_null_when_no_api_key(self, monkeypatch):
-        """Must return {"email": null} when TAVILY_API_KEY is not set."""
-        from agents.agent_sourcing.agent import get_supplier_contact
-        monkeypatch.setattr("agents.agent_sourcing.agent.settings.tavily_api_key", "")
+    def test_returns_null_when_no_email_found(self, monkeypatch):
+        """Must return {"email": null} when scraping and Tavily find nothing."""
+        from agents.agent_sourcing.tools import get_supplier_contact
+        monkeypatch.setattr("agents.agent_sourcing.tools.settings.tavily_api_key", "")
 
-        result = json.loads(get_supplier_contact("OfficePro", "https://officepro.com"))
+        with patch("agents.agent_sourcing.tools._scrape_email_from_url", return_value=None):
+            result = json.loads(get_supplier_contact("OfficePro", "https://officepro.com"))
 
         assert result["email"] is None
 
-    def test_extracts_email_from_search_content(self, monkeypatch):
-        """Must extract the first valid email found in search result content."""
-        from agents.agent_sourcing.agent import get_supplier_contact
-        monkeypatch.setattr("agents.agent_sourcing.agent.settings.tavily_api_key", "fake-key")
+    def test_extracts_email_via_scraping(self, monkeypatch):
+        """Must return email found by direct scraping."""
+        from agents.agent_sourcing.tools import get_supplier_contact
+        monkeypatch.setattr("agents.agent_sourcing.tools.settings.tavily_api_key", "")
+
+        def mock_scrape(url):
+            if "/contact" in url:
+                return "contact@supplier.com"
+            return None
+
+        with patch("agents.agent_sourcing.tools._scrape_email_from_url", side_effect=mock_scrape):
+            result = json.loads(get_supplier_contact("Supplier Co", "https://supplier.com"))
+
+        assert result["email"] == "contact@supplier.com"
+
+    def test_falls_back_to_tavily(self, monkeypatch):
+        """Must fall back to Tavily search if scraping finds nothing."""
+        from agents.agent_sourcing.tools import get_supplier_contact
+        monkeypatch.setattr("agents.agent_sourcing.tools.settings.tavily_api_key", "fake-key")
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -142,15 +158,16 @@ class TestGetSupplierContactTool:
         }
         mock_resp.raise_for_status.return_value = None
 
-        with patch("requests.post", return_value=mock_resp):
-            result = json.loads(get_supplier_contact("Supplier Co", "https://supplier.com"))
+        with patch("agents.agent_sourcing.tools._scrape_email_from_url", return_value=None):
+            with patch("agents.agent_sourcing.tools.requests.post", return_value=mock_resp):
+                result = json.loads(get_supplier_contact("Supplier Co", "https://supplier.com"))
 
         assert result["email"] == "contact@supplier.com"
 
     def test_skips_noreply_emails(self, monkeypatch):
         """Must skip noreply/donotreply addresses and return null if no other email found."""
-        from agents.agent_sourcing.agent import get_supplier_contact
-        monkeypatch.setattr("agents.agent_sourcing.agent.settings.tavily_api_key", "fake-key")
+        from agents.agent_sourcing.tools import get_supplier_contact
+        monkeypatch.setattr("agents.agent_sourcing.tools.settings.tavily_api_key", "fake-key")
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -158,35 +175,21 @@ class TestGetSupplierContactTool:
         }
         mock_resp.raise_for_status.return_value = None
 
-        with patch("requests.post", return_value=mock_resp):
-            result = json.loads(get_supplier_contact("Company", "https://company.com"))
-
-        assert result["email"] is None
-
-    def test_returns_null_when_no_email_in_content(self, monkeypatch):
-        """Must return {"email": null} when no email is found in search results."""
-        from agents.agent_sourcing.agent import get_supplier_contact
-        monkeypatch.setattr("agents.agent_sourcing.agent.settings.tavily_api_key", "fake-key")
-
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "results": [{"content": "Visit our website for product information."}]
-        }
-        mock_resp.raise_for_status.return_value = None
-
-        with patch("requests.post", return_value=mock_resp):
-            result = json.loads(get_supplier_contact("Supplier", "https://supplier.com"))
+        with patch("agents.agent_sourcing.tools._scrape_email_from_url", return_value=None):
+            with patch("agents.agent_sourcing.tools.requests.post", return_value=mock_resp):
+                result = json.loads(get_supplier_contact("Company", "https://company.com"))
 
         assert result["email"] is None
 
     def test_returns_null_on_network_error(self, monkeypatch):
         """Must return {"email": null} gracefully on a network error."""
         import requests as req
-        from agents.agent_sourcing.agent import get_supplier_contact
-        monkeypatch.setattr("agents.agent_sourcing.agent.settings.tavily_api_key", "fake-key")
+        from agents.agent_sourcing.tools import get_supplier_contact
+        monkeypatch.setattr("agents.agent_sourcing.tools.settings.tavily_api_key", "fake-key")
 
-        with patch("requests.post", side_effect=req.RequestException("timeout")):
-            result = json.loads(get_supplier_contact("Supplier", "https://supplier.com"))
+        with patch("agents.agent_sourcing.tools._scrape_email_from_url", return_value=None):
+            with patch("agents.agent_sourcing.tools.requests.post", side_effect=req.RequestException("timeout")):
+                result = json.loads(get_supplier_contact("Supplier", "https://supplier.com"))
 
         assert result["email"] is None
 
@@ -196,7 +199,6 @@ class TestGetSupplierContactTool:
 class TestSourcingAgent:
     """Integration tests for SourcingAgent with mocked Bedrock/Strands."""
 
-    # Simulated LLM JSON response
     MOCK_LLM_RESPONSE = json.dumps({
         "suppliers": [
             {
@@ -229,7 +231,6 @@ class TestSourcingAgent:
         with patch("agents.agent_sourcing.agent.BedrockModel"):
             with patch("agents.agent_sourcing.agent.Agent"):
                 agent = SourcingAgent()
-                # Replace the internal agent with a callable mock that returns llm_response
                 agent._agent = MagicMock(return_value=llm_response)
                 return agent
 
@@ -282,7 +283,7 @@ class TestSourcingAgent:
         result = agent.source(valid_procurement_spec)
 
         result_dict = asdict(result)
-        serialized = json.dumps(result_dict)  # Must not raise
+        serialized = json.dumps(result_dict)
         parsed = json.loads(serialized)
 
         assert "suppliers" in parsed

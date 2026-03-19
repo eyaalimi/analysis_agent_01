@@ -1,5 +1,4 @@
 """
-
 agents/analysis/agent.py
 Analysis Agent — extracts a structured ProcurementSpec from
 a requester's free-text email using Claude Sonnet 4 via Strands.
@@ -7,11 +6,12 @@ a requester's free-text email using Claude Sonnet 4 via Strands.
 import json
 import sys
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Optional
 
-from strands import Agent, tool
+from strands import Agent
 from strands.models import BedrockModel
+
 # Ensure project root is importable when running this file directly.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -19,7 +19,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from config import settings
 from logger import get_logger
-from email_gateway.sender import EmailSender
+from agents.analysis.tools import (
+    suggest_procurement_category,
+    validate_budget_range,
+    validate_deadline,
+    normalize_category,
+    normalize_unit,
+    send_request_acknowledgment,
+)
 
 logger = get_logger(__name__)
 
@@ -77,52 +84,6 @@ class ProcurementSpec:
     rejection_reason: Optional[str] = None
 
 
-@tool
-def suggest_procurement_category(product_or_text: str) -> str:
-    """Suggest a broad procurement category from a product or short request text."""
-    text = (product_or_text or "").lower()
-    if any(k in text for k in ["laptop", "pc", "ordinateur", "imprimante", "printer"]):
-        return "IT Equipment"
-    if any(k in text for k in ["stylo", "papier", "cahier", "fourniture", "office", "bureau"]):
-        return "Office Supplies"
-    if any(k in text for k in ["chaise", "table", "bureau meuble", "meuble"]):
-        return "Furniture"
-    if any(k in text for k in ["maintenance", "support", "service", "consulting", "formation"]):
-        return "Services"
-    return "Other"
-
-
-def _normalize_category(value: Optional[str]) -> str:
-    """Normalize category labels to English for consistent JSON outputs."""
-    text = (value or "").strip().lower()
-    mapping = {
-        "materiel informatique": "IT Equipment",
-        "matériel informatique": "IT Equipment",
-        "fournitures de bureau": "Office Supplies",
-        "mobilier": "Furniture",
-        "services": "Services",
-        "autre": "Other",
-    }
-    return mapping.get(text, value or "")
-
-
-def _normalize_unit(value: Optional[str]) -> Optional[str]:
-    """Normalize common French units to English."""
-    if value is None:
-        return None
-    text = value.strip().lower()
-    mapping = {
-        "unite": "units",
-        "unites": "units",
-        "unité": "units",
-        "boite": "boxes",
-        "boites": "boxes",
-        "boîte": "boxes",
-        "boîtes": "boxes",
-    }
-    return mapping.get(text, value)
-
-
 def _extract_first_json_object(raw: str) -> Optional[str]:
     """Return the first balanced JSON object found in text, or None."""
     start = raw.find("{")
@@ -153,59 +114,6 @@ def _extract_first_json_object(raw: str) -> Optional[str]:
                 return raw[start : i + 1]
 
     return None
-
-
-@tool
-def validate_budget_range(budget_min: Optional[float], budget_max: Optional[float]) -> str:
-    """Validate min/max budget consistency and return guidance."""
-    if budget_min is None and budget_max is None:
-        return "budget_missing"
-    if budget_min is not None and budget_max is not None and budget_min > budget_max:
-        return "budget_invalid_min_gt_max"
-    return "budget_ok"
-
-
-@tool
-def validate_deadline(deadline: Optional[str]) -> str:
-    """Validate that a deadline is a valid future date in YYYY-MM-DD format.
-    Returns: deadline_missing | deadline_invalid_format | deadline_in_past | deadline_ok
-    """
-    if not deadline:
-        return "deadline_missing"
-    from datetime import date
-    try:
-        parsed_date = date.fromisoformat(deadline)
-    except ValueError:
-        return "deadline_invalid_format"
-    if parsed_date < date.today():
-        return "deadline_in_past"
-    return "deadline_ok"
-
-
-@tool
-def send_request_acknowledgment(requester_email: str, is_valid: bool, product: str = "") -> str:
-    """Send an automatic acknowledgment email to the requester."""
-    subject = "We received your procurement request"
-    if is_valid:
-        body = (
-            "Hello,\n\n"
-            "We have successfully received your procurement request"
-            f" for: {product or 'your requested item'}.\n"
-            "Our team is reviewing it and will contact you shortly.\n\n"
-            "Regards,\nProcurement AI Team"
-        )
-    else:
-        body = (
-            "Hello,\n\n"
-            "We have received your message. "
-            "It does not seem to contain a complete procurement request yet.\n"
-            "Please resend your request with product/service details, quantity, and budget if available.\n\n"
-            "Regards,\nProcurement AI Team"
-        )
-
-    sender = EmailSender()
-    sender.send(to_email=requester_email, subject=subject, body=body)
-    return "ack_sent"
 
 
 class AnalysisAgent:
@@ -249,17 +157,14 @@ When extracting the deadline:
 """
         try:
             response = self._agent(prompt)
-            # Extract text from Strands response
             raw = str(response).strip()
 
-            # Try strict parse first, then fallback to extracting first JSON object.
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
                 cleaned = raw.strip()
                 if cleaned.startswith("```") and "```" in cleaned[3:]:
                     parts = cleaned.split("```")
-                    # Content is typically in parts[1].
                     if len(parts) > 1:
                         cleaned = parts[1].strip()
                         if cleaned.lower().startswith("json"):
@@ -287,9 +192,9 @@ When extracting the deadline:
 
         return ProcurementSpec(
             product=data.get("product", ""),
-            category=_normalize_category(data.get("category", "")),
+            category=normalize_category(data.get("category", "")),
             quantity=data.get("quantity"),
-            unit=_normalize_unit(data.get("unit")),
+            unit=normalize_unit(data.get("unit")),
             budget_min=data.get("budget_min"),
             budget_max=data.get("budget_max"),
             deadline=data.get("deadline"),
@@ -312,24 +217,20 @@ if __name__ == "__main__":
     from datetime import datetime
     from dotenv import load_dotenv
 
-    # ── Fix 1: force-load .env from the project root ──────────────
-    # Works whether you run from: project/, agents/, or agents/analysis/
     _here = os.path.abspath(__file__)
     _root = os.path.dirname(os.path.dirname(os.path.dirname(_here)))
     _env_path = os.path.join(_root, ".env")
     if os.path.exists(_env_path):
         load_dotenv(_env_path, override=True)
-        # Reload settings after dotenv is loaded
         from importlib import reload
         import config as _cfg
         reload(_cfg)
         from config import settings
     else:
-        print(f"⚠️  .env not found at {_env_path}")
+        print(f"  .env not found at {_env_path}")
         print("    Create it from .env.example and fill in your credentials.")
         sys.exit(1)
 
-    # Make sure project root is on PYTHONPATH
     sys.path.insert(0, _root)
     from email_gateway.parser import EmailParser
 
@@ -340,22 +241,19 @@ if __name__ == "__main__":
     agent = AnalysisAgent()
     parser = EmailParser()
 
-    # ── Fix 2: strip spaces from App Password ─────────────────────
-    # Google shows: "xxxx xxxx xxxx xxxx" — IMAP needs: "xxxxxxxxxxxxxxxx"
     _password = settings.gmail_app_password.replace(" ", "")
-
 
     def process_email(raw_bytes: bytes):
         parsed = parser.parse(raw_bytes)
 
         print(f"\n{'='*60}")
-        print(f"📨  Nouvel email — {datetime.now().strftime('%H:%M:%S')}")
+        print(f"  Nouvel email — {datetime.now().strftime('%H:%M:%S')}")
         print(f"    De      : {parsed.from_email}")
         print(f"    Objet   : {parsed.subject}")
         print(f"    Corps   : {parsed.body[:200].strip()!r}")
         print(f"{'='*60}")
 
-        print("🤖  Analyse en cours (Claude Sonnet 4)...")
+        print("  Analyse en cours (Claude Sonnet 4)...")
         spec = agent.analyze(parsed.body, parsed.from_email)
 
         try:
@@ -369,16 +267,15 @@ if __name__ == "__main__":
             print(f"[ACK] Failed to send acknowledgment email: {exc}")
 
         if spec.is_valid:
-            print("\n✅  Demande valide !")
+            print("\n  Demande valide !")
             print(f"    Produit   : {spec.product}")
-            print(f"    Catégorie : {spec.category}")
-            print(f"    Quantité  : {spec.quantity} {spec.unit or ''}")
-            print(f"    Budget    : {spec.budget_min or 'N/A'} – {spec.budget_max or 'N/A'} TND")
-            print(f"    Deadline  : {spec.deadline or 'Non précisée'}")
+            print(f"    Categorie : {spec.category}")
+            print(f"    Quantite  : {spec.quantity} {spec.unit or ''}")
+            print(f"    Budget    : {spec.budget_min or 'N/A'} - {spec.budget_max or 'N/A'} TND")
+            print(f"    Deadline  : {spec.deadline or 'Non precisee'}")
         else:
-            print(f"\n❌  Demande rejetée : {spec.rejection_reason}")
+            print(f"\n  Demande rejetee : {spec.rejection_reason}")
 
-        # Save result to JSON
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         label = "valid" if spec.is_valid else "rejected"
         filename = f"analysis_{label}_{ts}.json"
@@ -386,7 +283,7 @@ if __name__ == "__main__":
         with open(out_path, "w", encoding="utf-8") as f:
             import json as _json
             _json.dump(asdict(spec), f, ensure_ascii=False, indent=2, default=str)
-        print(f"\n💾  Résultat → {out_path}")
+        print(f"\n  Resultat -> {out_path}")
 
     def poll_once(conn: imaplib.IMAP4_SSL) -> int:
         """Check for UNSEEN emails. Returns number processed."""
@@ -396,35 +293,32 @@ if __name__ == "__main__":
         for num in ids:
             _, data = conn.fetch(num, "(RFC822)")
             raw = data[0][1]
-            conn.store(num, "+FLAGS", "\\Seen")   # mark as read
+            conn.store(num, "+FLAGS", "\\Seen")
             try:
                 process_email(raw)
             except Exception as exc:
-                print(f"⚠️   Erreur lors du traitement : {exc}")
+                print(f"  Erreur lors du traitement : {exc}")
         return len(ids)
 
-    # ── Main loop ─────────────────────────────────────────────────
-    print("\n🚀  Analysis Agent — mode surveillance active")
-    print(f"    Boîte    : {settings.gmail_address}")
+    print("\n  Analysis Agent — mode surveillance active")
+    print(f"    Boite    : {settings.gmail_address}")
     print(f"    Intervalle: toutes les {POLL_INTERVAL} secondes")
-    print("    Arrêt    : Ctrl+C\n")
+    print("    Arret    : Ctrl+C\n")
 
     conn = imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)
     conn.login(settings.gmail_address, _password)
-    print("✅  Connecté à Gmail — surveillance en cours...\n")
+    print("  Connecte a Gmail — surveillance en cours...\n")
 
     try:
         while True:
             try:
                 n = poll_once(conn)
                 if n == 0:
-                    print(f"📭  [{datetime.now().strftime('%H:%M:%S')}] Aucun nouveau mail — prochain check dans {POLL_INTERVAL}s")
+                    print(f"  [{datetime.now().strftime('%H:%M:%S')}] Aucun nouveau mail — prochain check dans {POLL_INTERVAL}s")
             except imaplib.IMAP4.abort:
-                # Connection dropped — reconnect silently
                 conn = imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)
                 conn.login(settings.gmail_address, _password)
             time.sleep(POLL_INTERVAL)
     except KeyboardInterrupt:
-        print("\n\n🛑  Surveillance arrêtée.")
+        print("\n\n  Surveillance arretee.")
         conn.logout()
-
