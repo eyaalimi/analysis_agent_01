@@ -260,8 +260,6 @@ class TestCommunicationAgent:
 
     def test_send_rfqs_returns_records(self, procurement_spec, supplier_list):
         """send_rfqs() must return a list of RFQRecord objects."""
-        from agents.agent_communication.agent import RFQRecord
-
         agent = self._make_agent()
         records = agent.send_rfqs(procurement_spec, supplier_list)
 

@@ -607,7 +607,7 @@ if __name__ == "__main__":
         if r.error:
             print(f"           Error: {r.error}")
 
-    print(f"\n--- Phase 2: Checking responses ---")
+    print("\n--- Phase 2: Checking responses ---")
     offers = agent.check_responses(rfq_records, sample_spec["product"])
     if offers:
         for o in offers:
@@ -615,7 +615,7 @@ if __name__ == "__main__":
     else:
         print("  No responses yet.")
 
-    print(f"\n  Full JSON output:")
+    print("\n  Full JSON output:")
     result = CommunicationResult(
         rfqs_sent=rfq_records,
         offers_received=offers,

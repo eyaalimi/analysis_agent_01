@@ -7,8 +7,6 @@ import json
 import imaplib
 import email as email_lib
 from datetime import datetime, timezone
-from typing import Optional
-
 from strands import tool
 
 from config import settings
