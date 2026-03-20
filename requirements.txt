@@ -13,6 +13,10 @@ pillow>=9.5.0
 beautifulsoup4
 apscheduler>=3.10.0
 
+# Agent 4 — Storage
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+
 # Agent 2 — Sourcing
 requests>=2.31.0
 tenacity>=8.2.0
