@@ -12,6 +12,7 @@ pdf2image>=1.16.0
 pillow>=9.5.0
 beautifulsoup4
 apscheduler>=3.10.0
+reportlab>=4.0.0
 
 # Agent 4 — Storage
 sqlalchemy>=2.0.0
