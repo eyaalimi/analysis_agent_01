@@ -8,6 +8,7 @@ pydantic-settings>=2.0.0
 pdfplumber>=0.9.0
 openpyxl
 pytesseract
+pdf2image>=1.16.0
 pillow>=9.5.0
 beautifulsoup4
 apscheduler>=3.10.0

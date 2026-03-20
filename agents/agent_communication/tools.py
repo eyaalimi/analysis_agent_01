@@ -213,18 +213,43 @@ def fetch_supplier_replies(rfq_subject_prefix: str) -> str:
 # ── Helpers (non-tool) ────────────────────────────────────────────────────────
 
 def _extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    """Extract text content from a PDF file (in-memory bytes)."""
+    """
+    Extract text from a PDF file (in-memory bytes).
+    Falls back to OCR (pytesseract) if pdfplumber extracts no text (scanned PDF).
+    """
+    # Step 1: Try text extraction with pdfplumber
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             pages = []
-            for page in pdf.pages[:20]:  # Limit to 20 pages
+            for page in pdf.pages[:20]:
                 text = page.extract_text()
                 if text:
                     pages.append(text)
-            return "\n".join(pages)[:4000]  # Limit total text size
+            if pages:
+                return "\n".join(pages)[:4000]
     except Exception as exc:
-        logger.warning("PDF extraction failed", extra={"error": str(exc)})
-        return ""
+        logger.warning("pdfplumber extraction failed", extra={"error": str(exc)})
+
+    # Step 2: Fallback to OCR for scanned PDFs
+    try:
+        from pdf2image import convert_from_bytes
+        import pytesseract
+
+        logger.info("Falling back to OCR for scanned PDF")
+        images = convert_from_bytes(pdf_bytes, first_page=1, last_page=10)
+        ocr_pages = []
+        for img in images:
+            text = pytesseract.image_to_string(img, lang="eng+fra")
+            if text and text.strip():
+                ocr_pages.append(text.strip())
+        if ocr_pages:
+            return "\n".join(ocr_pages)[:4000]
+    except ImportError:
+        logger.warning("OCR dependencies not available (pdf2image/pytesseract)")
+    except Exception as exc:
+        logger.warning("OCR extraction failed", extra={"error": str(exc)})
+
+    return ""
 
 
 def is_reminder_due(sent_at: str, hours_threshold: int = 72) -> bool:

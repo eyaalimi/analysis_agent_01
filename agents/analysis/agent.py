@@ -137,6 +137,29 @@ class AnalysisAgent:
     def analyze(self, email_body: str, requester_email: str) -> ProcurementSpec:
         logger.info("Analysis Agent invoked", extra={"requester": requester_email})
 
+        from utils.sanitizer import sanitize_email_input, detect_injection
+
+        # Sanitize + check for prompt injection
+        clean_body = sanitize_email_input(email_body)
+        injection = detect_injection(clean_body)
+        if injection:
+            logger.warning(
+                "Prompt injection detected in email",
+                extra={"requester": requester_email, "pattern": injection},
+            )
+            return ProcurementSpec(
+                product="",
+                category="",
+                quantity=None,
+                unit=None,
+                budget_min=None,
+                budget_max=None,
+                deadline=None,
+                requester_email=requester_email,
+                is_valid=False,
+                rejection_reason="Suspicious content detected in email",
+            )
+
         from datetime import date
         today = date.today().isoformat()
 
@@ -147,7 +170,7 @@ Requester email: {requester_email}
 
 Email body:
 ---
-{email_body}
+{clean_body}
 ---
 
 Extract the procurement information and return JSON.

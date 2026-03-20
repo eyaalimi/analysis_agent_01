@@ -414,16 +414,27 @@ Fetch replies and parse any supplier offers found.
             logger.error("Response check failed", extra={"error": str(exc)})
             data = {}
 
+        from utils.sanitizer import validate_price, validate_delivery_days, is_valid_email
+
         now = datetime.now(timezone.utc).isoformat()
         offers = []
         for o in data.get("offers", []):
+            supplier_email = o.get("supplier_email", "")
+            if supplier_email and not is_valid_email(supplier_email):
+                logger.warning("Skipping offer with invalid email", extra={"email": supplier_email})
+                continue
+
+            unit_price = validate_price(o.get("unit_price"))
+            total_price = validate_price(o.get("total_price"))
+            delivery_days = validate_delivery_days(o.get("delivery_days"))
+
             offers.append(SupplierOffer(
                 supplier_name=o.get("supplier_name", ""),
-                supplier_email=o.get("supplier_email", ""),
-                unit_price=o.get("unit_price"),
-                total_price=o.get("total_price"),
+                supplier_email=supplier_email,
+                unit_price=unit_price,
+                total_price=total_price,
                 currency=o.get("currency", "TND"),
-                delivery_days=o.get("delivery_days"),
+                delivery_days=delivery_days,
                 warranty=o.get("warranty"),
                 payment_terms=o.get("payment_terms"),
                 notes=o.get("notes"),
